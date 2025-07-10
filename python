@@ -1,0 +1,326 @@
+from flask import Flask, render_template_string, request, redirect, url_for, session
+from datetime import datetime
+import calendar as cal_lib
+
+app = Flask(__name__)
+app.secret_key = 'super-secret-key-123'
+
+users_db = {}
+users_db['username'] = {'password': '12345'}
+
+events_db = {}
+next_event_id = 1
+
+
+def error_page(message):
+    return render_template_string('''
+        <!doctype html>
+        <html>
+        <head><title>Ошибка</title></head>
+        <body>
+            <h2>Ошибка</h2>
+            <p>{{ message }}</p>
+            <p><a href="/login">Войти</a> | <a href="/register">Зарегистрироваться</a> | <a href="/">Вернуться на вход</a></p>
+        </body>
+        </html>
+    ''', message=message)
+
+
+def check_login():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    return None
+
+def generate_calendar_view(year, month):
+    cal = cal_lib.Calendar()
+    month_days = cal.monthdayscalendar(year, month)
+
+    month_events = {}
+    for event_id, event in events_db.items():
+        event_date = datetime.fromisoformat(event['start']).date()
+        if event_date.year == year and event_date.month == month:
+            day = event_date.day
+            if day not in month_events:
+                month_events[day] = []
+            month_events[day].append(event)
+
+    month_name = cal_lib.month_name[month]
+    html = f'<h2>Календарь мероприятий: {month_name} {year}</h2>'
+
+    prev_month = month - 1 if month > 1 else 12
+    prev_year = year if month > 1 else year - 1
+    next_month = month + 1 if month < 12 else 1
+    next_year = year if month < 12 else year + 1
+
+    html += f'''
+    <div style="margin-bottom: 20px;">
+        <a href="/calendar_view?year={prev_year}&month={prev_month}">← Предыдущий месяц</a>
+        <span style="margin: 0 20px;">{month_name} {year}</span>
+        <a href="/calendar_view?year={next_year}&month={next_month}">Следующий месяц →</a>
+    </div>
+    '''
+
+    html += '<table border="1" style="width: 100%; border-collapse: collapse;">'
+    html += '<tr><th>Пн</th><th>Вт</th><th>Ср</th><th>Чт</th><th>Пт</th><th>Сб</th><th>Вс</th></tr>'
+
+    for week in month_days:
+        html += '<tr>'
+        for day in week:
+            if day == 0:
+                html += '<td style="height: 100px; background-color: #f0f0f0;"></td>'
+            else:
+                day_events = month_events.get(day, [])
+                html += f'<td style="height: 100px; vertical-align: top; padding: 5px;">'
+                html += f'<div style="font-weight: bold; margin-bottom: 5px;">{day}</div>'
+
+                if day_events:
+                    html += '<div style="max-height: 80px; overflow-y: auto;">'
+                    for event in day_events:
+                        start_time = datetime.fromisoformat(event['start']).strftime('%H:%M')
+                        html += f'''
+                        <div style="margin-bottom: 5px; padding: 3px; background-color: #e0f7fa; border-radius: 3px;">
+                            <b>{start_time}</b> {event['title']}
+                            <div><small>{event['location']}</small></div>
+                        </div>
+                        '''
+                    html += '</div>'
+
+                html += '</td>'
+        html += '</tr>'
+
+    html += '</table>'
+    return html
+
+
+@app.route('/')
+def home():
+    if 'username' in session:
+        return (f'<h2>Привет, {session["username"]}, вы успешно вошли!</h2>'
+                f'<p><a href="/org_event">Организовать мероприятие</a></p>'
+                f'<p><a href="/calendar_view">Просмотреть календарь мероприятий</a></p>'
+                f'<p><a href="/personal">Просмотреть личный календарь</a></p>'
+                f'<p><a href="/logout">Выйти</a></p>')
+    return '<h2>Добро пожаловать!</h2> <p><a href="/login">Войти</a> или <a href="/register">Зарегистрироваться</a></p>'
+
+
+@app.route('/org_event', methods=['GET', 'POST'])
+def org_event():
+    auth_response = check_login()
+    if auth_response:
+        return auth_response
+
+    global next_event_id
+    if request.method == 'POST':
+        title = request.form.get('title')
+        description = request.form.get('description')
+        location = request.form.get('location')
+        start = request.form.get('start')
+        end = request.form.get('end')
+
+        if not all([title, start, end, location]):
+            return error_page('Все обязательные поля должны быть заполнены')
+
+        try:
+            start_dt = datetime.fromisoformat(start)
+            end_dt = datetime.fromisoformat(end)
+            if start_dt >= end_dt:
+                return error_page('Дата начала должна быть раньше даты окончания')
+        except ValueError:
+            return error_page('Неверный формат даты')
+
+        event_id = next_event_id
+        next_event_id += 1
+
+        events_db[event_id] = {
+            'id': event_id,
+            'title': title,
+            'description': description,
+            'location': location,
+            'start': start,
+            'end': end,
+            'organizer': session['username'],
+            'attendees': []
+        }
+
+        return f'''
+            <h2>Мероприятие "{title}" успешно создано!</h2>
+            <p><a href="/org_event">Создать еще</a> | <a href="/calendar_view">Просмотреть календарь</a> | <a href="/">На главную</a></p>
+        '''
+
+    return '''
+        <h2>Организовать мероприятие</h2>
+        <form method="post">
+            <label>Название*:</label><br>
+            <input type="text" name="title" required><br>
+
+            <label>Место проведения*:</label><br>
+            <input type="text" name="location" required><br>
+
+            <label>Описание:</label><br>
+            <textarea name="description"></textarea><br>
+
+            <label>Начало (ГГГГ-ММ-ДД ЧЧ:ММ)*:</label><br>
+            <input type="datetime-local" name="start" required><br>
+
+            <label>Окончание (ГГГГ-ММ-ДД ЧЧ:ММ)*:</label><br>
+            <input type="datetime-local" name="end" required><br><br>
+
+            <button type="submit">Создать</button>
+        </form>
+        <p><a href="/">На главную</a></p>
+    '''
+
+
+@app.route('/calendar_view', methods=['GET'])
+def calendar_view():
+    auth_response = check_login()
+    if auth_response:
+        return auth_response
+
+    # Get current year and month
+    now = datetime.now()
+    year = request.args.get('year', type=int, default=now.year)
+    month = request.args.get('month', type=int, default=now.month)
+
+    # Generate calendar HTML
+    calendar_html = generate_calendar_view(year, month)
+
+    return calendar_html + '<p><a href="/org_event">Создать мероприятие</a> | <a href="/">На главную</a></p>'
+
+
+@app.route('/signup/<int:event_id>', methods=['POST'])
+def signup(event_id):
+    auth_response = check_login()
+    if auth_response:
+        return auth_response
+
+    if event_id not in events_db:
+        return error_page('Мероприятие не найдено')
+
+    username = session['username']
+    event = events_db[event_id]
+
+    if username in event['attendees']:
+        return error_page('Вы уже записаны на это мероприятие')
+
+    event['attendees'].append(username)
+
+    return f'''
+        <h2>Вы успешно записаны на мероприятие "{event['title']}"!</h2>
+        <p><a href="/calendar_view">Вернуться к календарю мероприятий</a> | <a href="/personal">Посмотреть личный календарь</a></p>
+    '''
+
+
+@app.route('/personal')
+def personal():
+    auth_response = check_login()
+    if auth_response:
+        return auth_response
+
+    username = session['username']
+    events_html = '<h2>Ваш личный календарь</h2><ul>'
+
+    for event_id, event in events_db.items():
+        if username in event['attendees'] or event['organizer'] == username:
+            start_dt = datetime.fromisoformat(event['start'])
+            end_dt = datetime.fromisoformat(event['end'])
+
+            role = 'Организатор' if event['organizer'] == username else 'Участник'
+
+            events_html += f'''
+                <li>
+                    <h3>{event['title']} ({role})</h3>
+                    <p><b>Время:</b> {start_dt.strftime('%d.%m.%Y %H:%M')} - {end_dt.strftime('%d.%m.%Y %H:%M')}</p>
+                    <p><b>Место:</b> {event['location']}</p>
+                    <p><b>Описание:</b> {event['description']}</p>
+                </li>
+            '''
+
+    if events_html == '<h2>Ваш личный календарь</h2><ul>':
+        events_html += '<li>У вас пока нет мероприятий</li>'
+
+    events_html += '</ul>'
+
+    return events_html + '<p><a href="/calendar_view">Вернуться к календарю</a> | <a href="/">На главную</a></p>'
+
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+
+        if not all([username, password, confirm_password]):
+            return error_page('Все поля обязательны для заполнения')
+
+        if password != confirm_password:
+            return error_page('Пароли не совпадают')
+
+        if username in users_db:
+            return error_page('Это имя пользователя уже занято')
+
+        if len(password) < 4:
+            return error_page('Пароль должен содержать минимум 4 символа')
+
+        users_db[username] = {'password': password}
+        return '''
+        <html>
+        <h2>Вы успешно зарегистрированы!</h2>
+        <body>
+            <p><a href="/login">Войти</a></p>
+            <p><a href="/">Вернуться на главную страницу</a></p>
+        </body>
+        </html>
+        '''
+
+    return '''
+        <h2>Регистрация</h2>
+        <form method="post">
+            <label>Имя пользователя:</label><br>
+            <input type="text" name="username" required><br>
+            <label>Пароль:</label><br>
+            <input type="password" name="password" required><br>
+            <label>Подтвердите пароль:</label><br>
+            <input type="password" name="confirm_password" required><br><br>
+            <button type="submit">Зарегистрироваться</button>
+        </form>
+        <p>Уже зарегистрированы? <a href="/login">Войти</a></p>
+    '''
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+
+        user = users_db.get(username)
+
+        if not user or user['password'] != password:
+            return error_page('Неверное имя пользователя или пароль')
+
+        session['username'] = username
+        return redirect(url_for('home'))
+
+    return '''
+        <h2>Вход</h2>
+        <form method="post">
+            <label>Имя пользователя:</label><br>
+            <input type="text" name="username" required><br>
+            <label>Пароль:</label><br>
+            <input type="password" name="password" required><br><br>
+            <button type="submit">Войти</button>
+        </form>
+        <p>Еще нет аккаунта? <a href="/register">Зарегистрироваться</a></p>
+    '''
+
+
+@app.route('/logout')
+def logout():
+    session.pop('username', None)
+    return redirect(url_for('home'))
+
+
+if __name__ == '__main__':
+    app.run(debug=True) 
